@@ -1,0 +1,20 @@
+project:
+  name: "smc_signal_system"
+  timezone: "UTC"
+  data_dir: "./data"
+  backtest_dir: "./backtests"
+
+data:
+  exchange: "binance_usdm"
+  start_date: "2023-11-01"
+  end_date: "2024-11-01"
+  intervals: ["5m", "15m", "1h", "4h", "1d"]
+  limit_per_call: 1500
+
+backtest:
+  initial_balance: 10000
+  fee_bps: 4.0          # 0.04%
+  slippage_bps: 2.0     # 0.02%
+  max_trades_per_day: 5
+  seed: 42
+

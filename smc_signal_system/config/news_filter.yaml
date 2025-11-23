@@ -1,0 +1,10 @@
+news_filter:
+  enabled: true
+  blackout_minutes_before: 60
+  blackout_minutes_after: 60
+  manual_blackouts:
+    # 你以后手动填重大宏观事件
+    # - name: "FOMC"
+    #   start_utc: "2024-12-18T18:00:00Z"
+    #   end_utc: "2024-12-18T20:00:00Z"
+

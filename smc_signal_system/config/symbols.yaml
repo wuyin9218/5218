@@ -1,0 +1,6 @@
+symbols:
+  - "BTCUSDT"
+  - "ETHUSDT"
+  - "SOLUSDT"
+market: "perp_usdm"
+
