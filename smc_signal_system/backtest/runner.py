@@ -16,7 +16,8 @@ class BacktestRunner:
         self,
         global_config: GlobalConfig,
         risk_config: RiskConfig,
-        slippage_fee_model: SlippageFeeModel
+        slippage_fee_model: SlippageFeeModel,
+        news_filter=None
     ):
         """
         Initialize backtest runner.
@@ -25,19 +26,27 @@ class BacktestRunner:
             global_config: Global configuration
             risk_config: Risk management configuration
             slippage_fee_model: Slippage and fee model
+            news_filter: News filter instance (optional)
         """
         self.config = global_config
         self.risk_config = risk_config
         self.fee_model = slippage_fee_model
+        self.news_filter = news_filter
         
         # State
+        self.initial_balance = global_config.backtest.initial_balance
         self.balance = global_config.backtest.initial_balance
         self.trades: List[Trade] = []
         self.open_positions: dict = {}  # symbol -> position info
         self.daily_trades: dict = {}  # date -> count
+        self.daily_pnl: dict = {}  # date -> 当日 net_pnl 累计
+        self.equity_curve: list = []  # (timestamp, equity)
         self.consecutive_losses = 0
         self.last_trade_time: Optional[datetime] = None
         self.cooldown_until: Optional[datetime] = None
+        
+        # Initialize equity curve with starting point
+        self.equity_curve.append((None, self.initial_balance))
         
         # Set random seed for reproducibility
         np.random.seed(global_config.backtest.seed)
@@ -71,6 +80,12 @@ class BacktestRunner:
             minutes_since = (current_time - self.last_trade_time).total_seconds() / 60
             if minutes_since < self.risk_config.min_signal_interval_minutes:
                 return False
+        
+        # Check daily loss limit (日内亏损熔断)
+        daily_loss_limit_amount = self.initial_balance * (self.risk_config.daily_loss_limit_pct / 100.0)
+        daily_net_pnl = self.daily_pnl.get(date_key, 0.0)
+        if daily_net_pnl <= -daily_loss_limit_amount:
+            return False
         
         return True
     
@@ -126,6 +141,15 @@ class BacktestRunner:
         
         if symbol in self.open_positions:
             return False  # Already have position
+        
+        # Check minimum RR filter (最小 RR 过滤)
+        if take_profit_price is not None and stop_loss_price != entry_price:
+            risk = abs(entry_price - stop_loss_price)
+            reward = abs(take_profit_price - entry_price)
+            if risk > 0:
+                rr = reward / risk
+                if rr < self.risk_config.min_rr:
+                    return False  # RR 不满足要求，不开仓
         
         # Calculate position size
         quantity = self.calculate_position_size(entry_price, stop_loss_price)
@@ -251,6 +275,13 @@ class BacktestRunner:
         exit_proceeds = exec_exit_price * pos['quantity'] - exit_fee
         self.balance += exit_proceeds
         
+        # Update daily PnL
+        date_key = exit_time.date()
+        self.daily_pnl[date_key] = self.daily_pnl.get(date_key, 0.0) + net_pnl
+        
+        # Update equity curve
+        self.equity_curve.append((exit_time, self.balance))
+        
         # Record trade
         trade = Trade(
             entry_time=pos['entry_time'],
@@ -309,6 +340,10 @@ class BacktestRunner:
                 exit_reason = self.check_exit_conditions(symbol, current_price, current_time)
                 if exit_reason:
                     self.exit_position(symbol, current_price, current_time, exit_reason)
+            
+            # Check news blackout before generating signals (新闻黑窗过滤)
+            if self.news_filter is not None and self.news_filter.is_blackout(current_time):
+                continue  # Skip signal generation during blackout
             
             # Generate signal (only use data up to current candle)
             current_data = data.loc[:current_time]

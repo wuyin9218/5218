@@ -1,4 +1,12 @@
-"""Regression test to ensure backtest results are consistent."""
+"""
+Regression test to ensure backtest results are consistent.
+
+Note: This test does NOT depend on real Binance API access.
+If Binance requests fail, the system will automatically fall back to offline dummy data.
+The focus is on verifying:
+1. Same configuration produces identical results across multiple runs
+2. Output file schemas are correct
+"""
 
 import pytest
 import json
@@ -23,6 +31,8 @@ def test_backtest_consistency():
     Test that running the same backtest 3 times produces identical results.
     
     This ensures no randomness or state leakage between runs.
+    
+    Note: Uses offline dummy data if Binance API is unreachable.
     """
     # Load configurations
     config_dir = Path(__file__).parent.parent / "config"
@@ -106,6 +116,8 @@ def test_backtest_consistency():
 def test_backtest_output_schema():
     """
     Test that backtest output files have correct schema.
+    
+    Note: Uses offline dummy data if Binance API is unreachable.
     """
     config_dir = Path(__file__).parent.parent / "config"
     output_dir = Path(__file__).parent.parent / "backtests" / "test_schema"

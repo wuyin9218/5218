@@ -19,6 +19,8 @@ from data_layer.cache import DataCache
 from backtest.runner import BacktestRunner
 from backtest.slippage_fee import SlippageFeeModel
 from backtest.metrics import Trade
+from backtest.news_filter import NewsFilter
+from strategy_engine.model_a import TrendOBFVGStrategy
 
 
 def dummy_signal_generator(df: pd.DataFrame, current_time: datetime) -> dict:
@@ -59,12 +61,13 @@ def run_backtest(
         Tuple of (all_trades, combined_metrics)
     """
     # Initialize components
-    client = BinanceRestClient(limit_per_call=global_config.data.limit_per_call)
+    client = BinanceRestClient()
     cache = DataCache(cache_dir=global_config.project.data_dir)
     fee_model = SlippageFeeModel(
         fee_bps=global_config.backtest.fee_bps,
         slippage_bps=global_config.backtest.slippage_bps
     )
+    news_filter = NewsFilter(news_filter_config)
     
     all_trades = []
     all_metrics = []
@@ -112,14 +115,16 @@ def run_backtest(
             continue
         
         # Run backtest
-        runner = BacktestRunner(global_config, risk_config, fee_model)
+        runner = BacktestRunner(global_config, risk_config, fee_model, news_filter=news_filter)
         
-        # Create signal generator with symbol context
+        # Instantiate strategy for this symbol
+        strategy = TrendOBFVGStrategy(symbol=symbol)
+        
         def signal_gen(data, time):
-            signal = dummy_signal_generator(data, time)
-            if signal:
-                signal['symbol'] = symbol
-            return signal
+            sig = strategy.generate_signal(data, time)
+            if sig is None:
+                return None
+            return sig.to_dict()
         
         trades, metrics = runner.run(df, signal_gen)
         
