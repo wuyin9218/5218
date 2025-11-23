@@ -74,8 +74,12 @@ def run_backtest(
         print(f"Processing {symbol}...")
         
         # Fetch data for each interval (use primary interval for backtest)
-        # For skeleton, use 1h as primary interval
-        primary_interval = "1h"
+        # Get primary interval from config
+        primary_interval = (
+            global_config.data.intervals[0]
+            if getattr(global_config.data, "intervals", None) and len(global_config.data.intervals) > 0
+            else "1h"
+        )
         
         # Try to get from cache first
         start_date = pd.to_datetime(global_config.data.start_date)
