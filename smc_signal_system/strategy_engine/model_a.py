@@ -149,7 +149,7 @@ class TrendOBFVGStrategy(BaseStrategy):
         # In baseline mode, trend filter is not used
         self.debug_stats["num_failed_trend_filter"] = 0
         
-        # Get all order blocks, filter out invalid ones (only check prices, not timestamps)
+        # Get all order blocks, filter out invalid ones
         obs = structure.order_blocks
         if not obs:
             return None
@@ -159,62 +159,44 @@ class TrendOBFVGStrategy(BaseStrategy):
         current_high = float(row["high"])
         current_low = float(row["low"])
         
-        # Filter valid OBs (only check prices, timestamps may be invalid but we'll use them anyway)
+        # Filter valid OBs: must have valid prices and price range
         valid_obs = [
             ob for ob in obs
             if ob.high > 0 and ob.low > 0 and ob.high > ob.low
         ]
         
-        # If no valid OBs with proper prices, use a fallback: create a simple OB from recent price action
         if not valid_obs:
-            # Fallback: use recent high/low as OB
-            if len(window) >= 10:
-                recent_high = float(window["high"].tail(10).max())
-                recent_low = float(window["low"].tail(10).min())
-                if recent_high > recent_low and current_price > 0:
-                    # Create a synthetic bullish OB if price is near recent low
-                    if current_price <= recent_low * 1.02:
-                        ob_low = recent_low
-                        ob_high = recent_low * 1.01
-                        direction = "bullish"
-                    # Create a synthetic bearish OB if price is near recent high
-                    elif current_price >= recent_high * 0.98:
-                        ob_low = recent_high * 0.99
-                        ob_high = recent_high
-                        direction = "bearish"
-                    else:
-                        return None
-                else:
-                    return None
-            else:
-                return None
-        else:
-            # Sort OBs by time (most recent first), or by index if time is invalid
-            try:
-                sorted_obs = sorted(valid_obs, key=lambda o: o.time, reverse=True)
-            except:
-                # If time comparison fails, just use the list as-is
-                sorted_obs = valid_obs
+            # REMOVED: Synthetic OB fallback logic - it was producing unreliable signals
+            # In baseline mode, we should still use real SMC structure, just without trend/FVG filters
+            return None
+        
+        # Sort OBs by time (most recent first)
+        try:
+            sorted_obs = sorted(valid_obs, key=lambda o: o.time, reverse=True)
+        except (TypeError, AttributeError) as e:
+            # If time sorting fails, data is invalid - don't generate signal
+            print(f"[WARN] OB time sorting failed in baseline mode: {e}")
+            return None
+        
+        # Find the first OB that current price is touching
+        ob_found = False
+        for ob in sorted_obs:
+            ob_low = float(ob.low)
+            ob_high = float(ob.high)
+            direction = ob.direction.lower()
             
-            # Find the first OB that current price is touching
-            ob_found = False
-            for ob in sorted_obs:
-                ob_low = float(ob.low)
-                ob_high = float(ob.high)
-                direction = ob.direction.lower()
-                
-                # Check if current price is in OB range (price touches OB)
-                # Use a more lenient check: price overlaps with OB range
-                price_touches_ob = (
-                    (current_high >= ob_low) and (current_low <= ob_high)
-                )
-                
-                if price_touches_ob:
-                    ob_found = True
-                    break
+            # Check if current price is in OB range (price touches OB)
+            # Use a more lenient check: price overlaps with OB range
+            price_touches_ob = (
+                (current_high >= ob_low) and (current_low <= ob_high)
+            )
             
-            if not ob_found:
-                return None
+            if price_touches_ob:
+                ob_found = True
+                break
+        
+        if not ob_found:
+            return None
             
         # Found a potential setup
         self.debug_stats["num_potential_setups"] += 1
@@ -225,18 +207,26 @@ class TrendOBFVGStrategy(BaseStrategy):
             entry_price = max(ob_low, current_price)
             stop_loss = ob_low * 0.999  # Slightly below OB low
             risk = entry_price - stop_loss
-            if risk <= 0:
+            
+            # CRITICAL: Check minimum risk threshold (0.2% of entry price)
+            min_risk_threshold = entry_price * 0.002
+            if risk <= 0 or risk < min_risk_threshold:
                 self.debug_stats["num_failed_rr_filter"] += 1
                 return None
+            
             take_profit = entry_price + risk * self.rr_target
         else:  # bearish
             side = "sell"
             entry_price = min(ob_high, current_price)
             stop_loss = ob_high * 1.001  # Slightly above OB high
             risk = stop_loss - entry_price
-            if risk <= 0:
+            
+            # CRITICAL: Check minimum risk threshold (0.2% of entry price)
+            min_risk_threshold = entry_price * 0.002
+            if risk <= 0 or risk < min_risk_threshold:
                 self.debug_stats["num_failed_rr_filter"] += 1
                 return None
+            
             take_profit = entry_price - risk * self.rr_target
         
         # Generate signal
@@ -329,18 +319,26 @@ class TrendOBFVGStrategy(BaseStrategy):
             entry_price = close
             stop_loss = min(ob.low, low)
             risk = entry_price - stop_loss
-            if risk <= 0:
+            
+            # CRITICAL: Check minimum risk threshold (0.2% of entry price)
+            min_risk_threshold = entry_price * 0.002
+            if risk <= 0 or risk < min_risk_threshold:
                 self.debug_stats["num_failed_rr_filter"] += 1
                 return None
+            
             take_profit = entry_price + self.rr_target * risk
         else:
             side = "sell"
             entry_price = close
             stop_loss = max(ob.high, high)
             risk = stop_loss - entry_price
-            if risk <= 0:
+            
+            # CRITICAL: Check minimum risk threshold (0.2% of entry price)
+            min_risk_threshold = entry_price * 0.002
+            if risk <= 0 or risk < min_risk_threshold:
                 self.debug_stats["num_failed_rr_filter"] += 1
                 return None
+            
             take_profit = entry_price - self.rr_target * risk
 
         # Check if RR meets minimum requirement (if we have a min_rr config)
@@ -419,11 +417,18 @@ class TrendOBFVGStrategy(BaseStrategy):
 
     def _has_fvg_confirmation(self, structure: SMCStructure, trend: str) -> bool:
         """
-        Check if there is at least one FVG in the trend direction.
+        Check if there is at least one valid (unfilled) FVG in the trend direction.
+        
+        Args:
+            structure: SMC structure
+            trend: Trend direction ('bullish' or 'bearish')
+        
+        Returns:
+            True if valid FVG exists
         """
         fvgs: List[FVG] = [
             f for f in structure.fvgs
-            if f.direction.lower() == trend
+            if f.direction.lower() == trend and not f.filled  # Filter out filled FVGs
         ]
         return len(fvgs) > 0
 

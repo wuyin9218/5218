@@ -164,8 +164,8 @@ class SMCIndicators:
         try:
             result = smc.fvg(df, join_consecutive=join_consecutive)
             return self._parse_result_to_fvgs(result)
-        except Exception as e:
-            print(f"Warning: FVG calculation failed: {e}")
+        except (ValueError, KeyError, AttributeError) as e:
+            print(f"[WARN] FVG calculation failed: {e}")
             return []
     
     def swing_highs_lows(
@@ -188,8 +188,8 @@ class SMCIndicators:
                 swing_length = max(int(self.swing_left), int(self.swing_right))
             result = smc.swing_highs_lows(df, swing_length=swing_length)
             return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
-        except Exception as e:
-            print(f"Warning: Swing highs/lows calculation failed: {e}")
+        except (ValueError, KeyError, AttributeError) as e:
+            print(f"[WARN] Swing highs/lows calculation failed: {e}")
             return pd.DataFrame()
     
     def bos_choch(
@@ -366,8 +366,10 @@ class SMCIndicators:
         swing_df = None
         try:
             swing_df = self.swing_highs_lows(df, swing_length=swing_length)
-        except Exception as e:
-            print(f"Warning: Swing calculation failed in calculate_all: {e}")
+            if swing_df.empty:
+                print(f"[WARN] Swing calculation returned empty DataFrame - dependent indicators will be skipped")
+        except (ValueError, KeyError, AttributeError) as e:
+            print(f"[ERROR] Swing calculation failed critically in calculate_all: {e}")
             swing_df = pd.DataFrame()
         
         # Calculate all indicators, reusing swing_df where needed
@@ -383,50 +385,50 @@ class SMCIndicators:
         # FVG (doesn't need swing_highs_lows)
         try:
             fvgs = self.fvg(df, join_consecutive=False)
-        except Exception as e:
-            print(f"Warning: FVG calculation failed in calculate_all: {e}")
+        except (ValueError, KeyError, AttributeError) as e:
+            print(f"[WARN] FVG calculation failed in calculate_all: {e}")
         
         # Swing points (parse from swing_df)
         try:
             swing_points = self._parse_result_to_swings(swing_df) if not swing_df.empty else []
-        except Exception as e:
-            print(f"Warning: Swing points parsing failed in calculate_all: {e}")
+        except (ValueError, KeyError, AttributeError) as e:
+            print(f"[WARN] Swing points parsing failed in calculate_all: {e}")
         
         # BOS/CHOC (needs swing_highs_lows)
         try:
             bos_choch_list = self.bos_choch(df, swing_highs_lows=swing_df) if not swing_df.empty else []
-        except Exception as e:
-            print(f"Warning: BOS/CHOC calculation failed in calculate_all: {e}")
+        except (ValueError, KeyError, AttributeError) as e:
+            print(f"[WARN] BOS/CHOC calculation failed in calculate_all: {e}")
         
         # Order Blocks (needs swing_highs_lows)
         try:
             order_blocks = self.ob(df, swing_highs_lows=swing_df, close_mitigation=False) if not swing_df.empty else []
-        except Exception as e:
-            print(f"Warning: OB calculation failed in calculate_all: {e}")
+        except (ValueError, KeyError, AttributeError) as e:
+            print(f"[WARN] OB calculation failed in calculate_all: {e}")
         
         # Liquidity (needs swing_highs_lows)
         try:
             liquidity_zones = self.liquidity(df, swing_highs_lows=swing_df, range_percent=0.01) if not swing_df.empty else []
-        except Exception as e:
-            print(f"Warning: Liquidity calculation failed in calculate_all: {e}")
+        except (ValueError, KeyError, AttributeError) as e:
+            print(f"[WARN] Liquidity calculation failed in calculate_all: {e}")
         
         # Previous high/low (doesn't need swing_highs_lows)
         try:
             previous_highs_lows = self.previous_high_low(df, time_frame="1D")
-        except Exception as e:
-            print(f"Warning: Previous high/low calculation failed in calculate_all: {e}")
+        except (ValueError, KeyError, AttributeError) as e:
+            print(f"[WARN] Previous high/low calculation failed in calculate_all: {e}")
         
         # Sessions (doesn't need swing_highs_lows)
         try:
             sessions_list = self.sessions(df, session="New York", time_zone="UTC")
-        except Exception as e:
-            print(f"Warning: Sessions calculation failed in calculate_all: {e}")
+        except (ValueError, KeyError, AttributeError) as e:
+            print(f"[WARN] Sessions calculation failed in calculate_all: {e}")
         
         # Retracements (needs swing_highs_lows)
         try:
             retracements_list = self.retracements(df, swing_highs_lows=swing_df) if not swing_df.empty else []
-        except Exception as e:
-            print(f"Warning: Retracements calculation failed in calculate_all: {e}")
+        except (ValueError, KeyError, AttributeError) as e:
+            print(f"[WARN] Retracements calculation failed in calculate_all: {e}")
         
         return SMCStructure(
             timestamp=timestamp,
