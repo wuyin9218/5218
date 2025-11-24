@@ -55,3 +55,5 @@ class BaseStrategy(ABC):
         """
         raise NotImplementedError
 
+
+

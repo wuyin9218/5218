@@ -41,6 +41,7 @@ class GlobalConfig:
     project: ProjectConfig
     data: DataConfig
     backtest: BacktestConfig
+    strategies: Optional[dict] = None
 
     @classmethod
     def from_yaml(cls, path: str) -> "GlobalConfig":
@@ -48,10 +49,13 @@ class GlobalConfig:
         with open(path, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
         
+        strategies = data.get('strategies', None)
+        
         return cls(
             project=ProjectConfig(**data['project']),
             data=DataConfig(**data['data']),
-            backtest=BacktestConfig(**data['backtest'])
+            backtest=BacktestConfig(**data['backtest']),
+            strategies=strategies
         )
 
 
@@ -122,4 +126,6 @@ class NewsFilterConfig:
             blackout_minutes_after=data['news_filter']['blackout_minutes_after'],
             manual_blackouts=blackouts
         )
+
+
 

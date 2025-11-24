@@ -20,6 +20,7 @@ class Trade:
     pnl_pct: float
     fees: float
     rr: Optional[float] = None  # Risk-reward ratio
+    exit_reason: str = "unknown"
 
 
 @dataclass
@@ -183,4 +184,6 @@ class MetricsCalculator:
             "sharpe_ratio": round(metrics.sharpe_ratio, 4) if metrics.sharpe_ratio is not None else None,
             "calmar_ratio": round(metrics.calmar_ratio, 4) if metrics.calmar_ratio is not None else None
         }
+
+
 

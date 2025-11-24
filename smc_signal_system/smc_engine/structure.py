@@ -183,3 +183,5 @@ class SMCStructure:
             "direction": ret.direction
         }
 
+
+

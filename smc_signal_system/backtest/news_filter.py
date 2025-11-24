@@ -64,3 +64,5 @@ class NewsFilter:
         
         return False
 
+
+

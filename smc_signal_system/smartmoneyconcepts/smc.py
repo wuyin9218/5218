@@ -898,9 +898,15 @@ class smc:
                 direction[i] = direction[i - 1] if i > 0 else 0
 
             if direction[i - 1] == 1:
-                current_retracement[i] = round(
-                    100 - (((ohlc["low"].iloc[i] - bottom) / (top - bottom)) * 100), 1
-                )
+                denom = top - bottom
+                if denom == 0:
+                    # 区间长度为 0 的极端情况，避免除零
+                    # 处理策略：认为价格在区间中部，给一个折中值 50.0
+                    discount = 50.0
+                else:
+                    normalized = (ohlc["low"].iloc[i] - bottom) / denom
+                    discount = max(100 - (normalized * 100), 1)
+                current_retracement[i] = round(discount, 1)
                 deepest_retracement[i] = max(
                     (
                         deepest_retracement[i - 1]
@@ -910,9 +916,15 @@ class smc:
                     current_retracement[i],
                 )
             if direction[i] == -1:
-                current_retracement[i] = round(
-                    100 - ((ohlc["high"].iloc[i] - top) / (bottom - top)) * 100, 1
-                )
+                denom = bottom - top
+                if denom == 0:
+                    # 区间长度为 0 的极端情况，避免除零
+                    # 处理策略：认为价格在区间中部，给一个折中值 50.0
+                    discount = 50.0
+                else:
+                    normalized = (ohlc["high"].iloc[i] - top) / denom
+                    discount = max(100 - (normalized * 100), 1)
+                current_retracement[i] = round(discount, 1)
                 deepest_retracement[i] = max(
                     (
                         deepest_retracement[i - 1]

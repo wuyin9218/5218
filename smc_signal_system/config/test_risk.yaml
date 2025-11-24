@@ -1,0 +1,8 @@
+risk:
+  risk_per_trade_pct: 0.5
+  daily_loss_limit_pct: 3.0
+  consecutive_loss_limit: 3
+  cooldown_minutes: 240
+  min_signal_interval_minutes: 180
+  min_rr: 1.5
+

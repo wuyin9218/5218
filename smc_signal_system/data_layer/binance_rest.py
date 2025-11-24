@@ -192,11 +192,11 @@ class BinanceRestClient:
         else:
             # Convert interval to pandas frequency string
             freq_map = {
-                "1m": "1T",
-                "3m": "3T",
-                "5m": "5T",
-                "15m": "15T",
-                "30m": "30T",
+                "1m": "1min",
+                "3m": "3min",
+                "5m": "5min",
+                "15m": "15min",
+                "30m": "30min",
                 "1h": "1h",
                 "2h": "2h",
                 "4h": "4h",

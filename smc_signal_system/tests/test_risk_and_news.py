@@ -69,7 +69,7 @@ def test_min_rr_filter():
     stop_loss = 95.0
     take_profit = 107.0  # RR = (107-100)/(100-95) = 7/5 = 1.4
     
-    result1 = runner.enter_position(
+    result1, reason1 = runner.enter_position(
         symbol="TEST",
         side="buy",
         entry_price=entry_price,
@@ -87,7 +87,7 @@ def test_min_rr_filter():
     stop_loss = 95.0
     take_profit = 110.0  # RR = (110-100)/(100-95) = 10/5 = 2.0
     
-    result2 = runner.enter_position(
+    result2, reason2 = runner.enter_position(
         symbol="TEST",
         side="buy",
         entry_price=entry_price,

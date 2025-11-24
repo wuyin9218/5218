@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import Tuple
+from typing import Tuple, Optional
 import pandas as pd
 
 # Add parent directory to path
@@ -47,7 +47,7 @@ def run_backtest(
     symbols_config: SymbolsConfig,
     risk_config: RiskConfig,
     news_filter_config: NewsFilterConfig
-) -> Tuple[list, dict]:
+) -> Tuple[list, dict, dict]:
     """
     Run backtest for all symbols.
     
@@ -58,8 +58,11 @@ def run_backtest(
         news_filter_config: News filter configuration
     
     Returns:
-        Tuple of (all_trades, combined_metrics)
+        Tuple of (all_trades, combined_metrics, signal_stats_dict)
     """
+    # Initialize signal statistics dictionary
+    signal_stats_dict = {}
+    
     # Initialize components
     client = BinanceRestClient()
     cache = DataCache(cache_dir=global_config.project.data_dir)
@@ -90,9 +93,26 @@ def run_backtest(
         
         df = cache.get(symbol, primary_interval, start_date, end_date)
         
+        # Check if cached data covers the required range
+        need_refetch = False
         if df is None or df.empty:
-            # Fetch from API
+            need_refetch = True
             print(f"  Fetching {symbol} {primary_interval} data...")
+        else:
+            # Check if cached data covers the required date range
+            cached_start = df.index.min() if not df.empty else None
+            cached_end = df.index.max() if not df.empty else None
+            
+            # Check if we have enough data in the required range
+            filtered_df = df[(df.index >= start_date) & (df.index <= end_date)]
+            if filtered_df.empty or len(filtered_df) < 100:  # Require at least 100 candles
+                need_refetch = True
+                print(f"  Cached data insufficient (got {len(filtered_df)} candles), fetching {symbol} {primary_interval} data...")
+            elif cached_start > start_date or (cached_end and cached_end < end_date):
+                need_refetch = True
+                print(f"  Cached data range doesn't cover required range, fetching {symbol} {primary_interval} data...")
+        
+        if need_refetch:
             df = client.fetch_klines(
                 symbol=symbol,
                 interval=primary_interval,
@@ -117,8 +137,13 @@ def run_backtest(
         # Run backtest
         runner = BacktestRunner(global_config, risk_config, fee_model, news_filter=news_filter)
         
+        # Load strategy config from global config
+        strategy_config = {}
+        if global_config.strategies and 'model_a' in global_config.strategies:
+            strategy_config = global_config.strategies['model_a']
+        
         # Instantiate strategy for this symbol
-        strategy = TrendOBFVGStrategy(symbol=symbol)
+        strategy = TrendOBFVGStrategy(symbol=symbol, config=strategy_config)
         
         def signal_gen(data, time):
             sig = strategy.generate_signal(data, time)
@@ -126,13 +151,16 @@ def run_backtest(
                 return None
             return sig.to_dict()
         
-        trades, metrics = runner.run(df, signal_gen)
+        trades, metrics, signal_stats = runner.run(df, signal_gen)
         
         all_trades.extend(trades)
         all_metrics.append({
             'symbol': symbol,
             **metrics
         })
+        
+        # Store signal statistics per symbol
+        signal_stats_dict[symbol] = signal_stats
         
         print(f"  Completed {symbol}: {metrics.get('total_trades', 0)} trades")
     
@@ -158,14 +186,15 @@ def run_backtest(
     else:
         combined_metrics = {}
     
-    return all_trades, combined_metrics
+    return all_trades, combined_metrics, signal_stats_dict
 
 
 def save_results(
     trades: list,
     metrics: dict,
     output_dir: Path,
-    phase: str = "skeleton"
+    phase: str = "skeleton",
+    signal_stats: Optional[dict] = None
 ):
     """
     Save backtest results to files.
@@ -175,6 +204,7 @@ def save_results(
         metrics: Metrics dictionary
         output_dir: Output directory
         phase: Phase name (e.g., "skeleton")
+        signal_stats: Signal pipeline statistics dictionary
     """
     output_dir = output_dir / phase
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -197,7 +227,8 @@ def save_results(
             'pnl': t.pnl,
             'pnl_pct': t.pnl_pct,
             'fees': t.fees,
-            'rr': t.rr
+            'rr': t.rr,
+            'exit_reason': getattr(t, 'exit_reason', 'unknown')
         } for t in trades])
         
         trades_path = output_dir / "trades.csv"
@@ -208,9 +239,16 @@ def save_results(
         empty_df = pd.DataFrame(columns=[
             'entry_time', 'exit_time', 'symbol', 'side',
             'entry_price', 'exit_price', 'quantity',
-            'pnl', 'pnl_pct', 'fees', 'rr'
+            'pnl', 'pnl_pct', 'fees', 'rr', 'exit_reason'
         ])
         empty_df.to_csv(trades_path, index=False)
+    
+    # Save signal_stats.json
+    if signal_stats:
+        stats_path = output_dir / "signal_stats.json"
+        with open(stats_path, 'w', encoding='utf-8') as f:
+            json.dump(signal_stats, f, indent=2, ensure_ascii=False)
+        print(f"  Signal stats: {stats_path}")
     
     print(f"\nResults saved to:")
     print(f"  Summary: {summary_path}")
@@ -270,16 +308,32 @@ def main():
     print()
     
     try:
-        trades, metrics = run_backtest(
+        trades, metrics, signal_stats = run_backtest(
             global_config,
             symbols_config,
             risk_config,
             news_filter_config
         )
         
+        # Print signal pipeline stats
+        if signal_stats:
+            print("\n=== Signal pipeline stats ===")
+            for symbol, stats in signal_stats.items():
+                print(
+                    f"{symbol}: raw={stats.get('raw_signals', 0)}, "
+                    f"after_news={stats.get('after_news_filter', 0)}, "
+                    f"after_min_rr={stats.get('after_min_rr', 0)}, "
+                    f"executed={stats.get('executed_trades', 0)}, "
+                    f"skipped_open={stats.get('skipped_open_position', 0)}, "
+                    f"skipped_max_trades={stats.get('skipped_max_trades_per_day', 0)}, "
+                    f"skipped_min_interval={stats.get('skipped_min_interval', 0)}, "
+                    f"skipped_other={stats.get('skipped_other', 0)}"
+                )
+            print("=" * 30)
+        
         # Save results
         output_dir = Path(global_config.project.backtest_dir)
-        save_results(trades, metrics, output_dir, args.phase)
+        save_results(trades, metrics, output_dir, args.phase, signal_stats)
         
         # Print summary
         print("\n=== Backtest Summary ===")

@@ -126,3 +126,5 @@ python scripts/run_backtest.py --config config/global.yaml
 - Week 2: 实现具体的 SMC 信号生成策略
 - Week 3: 实现滚动窗口分析（walkforward）
 
+
+

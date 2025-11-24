@@ -45,13 +45,16 @@ class BacktestRunner:
         self.last_trade_time: Optional[datetime] = None
         self.cooldown_until: Optional[datetime] = None
         
+        # Signal pipeline statistics
+        self._init_signal_stats()
+        
         # Initialize equity curve with starting point
         self.equity_curve.append((None, self.initial_balance))
         
         # Set random seed for reproducibility
         np.random.seed(global_config.backtest.seed)
     
-    def can_trade(self, current_time: datetime) -> bool:
+    def can_trade(self, current_time: datetime) -> Tuple[bool, Optional[str]]:
         """
         Check if trading is allowed based on risk rules.
         
@@ -59,35 +62,35 @@ class BacktestRunner:
             current_time: Current timestamp
         
         Returns:
-            True if trading is allowed
+            Tuple of (allowed flag, reason string if not allowed)
         """
         # Check cooldown
         if self.cooldown_until and current_time < self.cooldown_until:
-            return False
+            return False, 'other'
         
         # Check consecutive losses
         if self.consecutive_losses >= self.risk_config.consecutive_loss_limit:
-            return False
+            return False, 'other'
         
         # Check daily trade limit
         date_key = current_time.date()
         if date_key in self.daily_trades:
             if self.daily_trades[date_key] >= self.config.backtest.max_trades_per_day:
-                return False
+                return False, 'max_trades'
         
         # Check minimum signal interval
         if self.last_trade_time:
             minutes_since = (current_time - self.last_trade_time).total_seconds() / 60
             if minutes_since < self.risk_config.min_signal_interval_minutes:
-                return False
+                return False, 'min_interval'
         
         # Check daily loss limit (日内亏损熔断)
         daily_loss_limit_amount = self.initial_balance * (self.risk_config.daily_loss_limit_pct / 100.0)
         daily_net_pnl = self.daily_pnl.get(date_key, 0.0)
         if daily_net_pnl <= -daily_loss_limit_amount:
-            return False
+            return False, 'other'
         
-        return True
+        return True, None
     
     def calculate_position_size(
         self,
@@ -120,8 +123,9 @@ class BacktestRunner:
         entry_price: float,
         stop_loss_price: float,
         take_profit_price: Optional[float],
-        entry_time: datetime
-    ) -> bool:
+        entry_time: datetime,
+        check_rr: bool = True
+    ) -> Tuple[bool, Optional[str]]:
         """
         Enter a new position.
         
@@ -132,29 +136,30 @@ class BacktestRunner:
             stop_loss_price: Stop loss price
             take_profit_price: Take profit price (optional)
             entry_time: Entry timestamp
-        
+            check_rr: Whether to check RR filter (for statistics)
         Returns:
-            True if position entered successfully
+            Tuple of (success flag, failure reason)
         """
-        if not self.can_trade(entry_time):
-            return False
+        can_trade_allowed, blocked_reason = self.can_trade(entry_time)
+        if not can_trade_allowed:
+            return False, blocked_reason or 'other'
         
         if symbol in self.open_positions:
-            return False  # Already have position
+            return False, 'open_position'  # Already have position
         
         # Check minimum RR filter (最小 RR 过滤)
-        if take_profit_price is not None and stop_loss_price != entry_price:
+        if check_rr and take_profit_price is not None and stop_loss_price != entry_price:
             risk = abs(entry_price - stop_loss_price)
             reward = abs(take_profit_price - entry_price)
             if risk > 0:
                 rr = reward / risk
                 if rr < self.risk_config.min_rr:
-                    return False  # RR 不满足要求，不开仓
+                    return False, 'other'  # RR 不满足要求，不开仓
         
         # Calculate position size
         quantity = self.calculate_position_size(entry_price, stop_loss_price)
         if quantity <= 0:
-            return False
+            return False, 'other'
         
         # Calculate entry cost with slippage and fees
         exec_price = self.fee_model.get_execution_price(entry_price, side)
@@ -163,7 +168,7 @@ class BacktestRunner:
         
         # Check if we have enough balance
         if entry_cost > self.balance:
-            return False
+            return False, 'other'
         
         # Enter position
         self.open_positions[symbol] = {
@@ -185,7 +190,7 @@ class BacktestRunner:
         date_key = entry_time.date()
         self.daily_trades[date_key] = self.daily_trades.get(date_key, 0) + 1
         
-        return True
+        return True, None
     
     def check_exit_conditions(
         self,
@@ -316,7 +321,7 @@ class BacktestRunner:
         self,
         data: pd.DataFrame,
         signal_generator: Callable[[pd.DataFrame, datetime], Optional[dict]]
-    ) -> Tuple[List[Trade], dict]:
+    ) -> Tuple[List[Trade], dict, dict]:
         """
         Run backtest on data.
         
@@ -325,10 +330,13 @@ class BacktestRunner:
             signal_generator: Function that takes (df, current_time) and returns signal dict or None
         
         Returns:
-            Tuple of (trades list, metrics dict)
+            Tuple of (trades list, metrics dict, signal_stats dict)
         """
         if data.empty:
-            return [], {}
+            return [], {}, self.signal_stats
+        
+        # Reset signal statistics
+        self._init_signal_stats()
         
         # Process each candle (only use close price to avoid lookahead)
         for idx, row in data.iterrows():
@@ -341,30 +349,58 @@ class BacktestRunner:
                 if exit_reason:
                     self.exit_position(symbol, current_price, current_time, exit_reason)
             
-            # Check news blackout before generating signals (新闻黑窗过滤)
-            if self.news_filter is not None and self.news_filter.is_blackout(current_time):
-                continue  # Skip signal generation during blackout
-            
             # Generate signal (only use data up to current candle)
             current_data = data.loc[:current_time]
             signal = signal_generator(current_data, current_time)
             
+            # Count raw signals
             if signal:
+                self.signal_stats['raw_signals'] += 1
+                
+                # Check news blackout (新闻黑窗过滤)
+                if self.news_filter is not None and self.news_filter.is_blackout(current_time):
+                    self._increment_skip('news_blackout')
+                    continue  # Skip signal generation during blackout
+                
+                self.signal_stats['after_news_filter'] += 1
+                
                 symbol = signal.get('symbol', 'UNKNOWN')
                 side = signal.get('side', 'buy')
                 entry_price = signal.get('entry_price', current_price)
                 stop_loss = signal.get('stop_loss')
                 take_profit = signal.get('take_profit')
                 
-                if stop_loss:
-                    self.enter_position(
-                        symbol=symbol,
-                        side=side,
-                        entry_price=entry_price,
-                        stop_loss_price=stop_loss,
-                        take_profit_price=take_profit,
-                        entry_time=current_time
-                    )
+                if stop_loss is not None:
+                    # Check RR before attempting to enter (for statistics)
+                    passed_rr = True
+                    if take_profit is not None and stop_loss != entry_price:
+                        risk = abs(entry_price - stop_loss)
+                        reward = abs(take_profit - entry_price)
+                        if risk > 0:
+                            rr = reward / risk
+                            if rr < self.risk_config.min_rr:
+                                passed_rr = False
+                    
+                    if passed_rr:
+                        self.signal_stats['after_min_rr'] += 1
+                        
+                        # Try to enter position
+                        success, fail_reason = self.enter_position(
+                            symbol=symbol,
+                            side=side,
+                            entry_price=entry_price,
+                            stop_loss_price=stop_loss,
+                            take_profit_price=take_profit,
+                            entry_time=current_time,
+                            check_rr=False  # Already checked above
+                        )
+                        
+                        if not success:
+                            self._increment_skip(fail_reason)
+                    else:
+                        self._increment_skip('min_rr')
+                else:
+                    self._increment_skip('missing_stop_loss')
         
         # Close all remaining positions at end
         final_time = data.index[-1]
@@ -372,9 +408,38 @@ class BacktestRunner:
         for symbol in list(self.open_positions.keys()):
             self.exit_position(symbol, final_price, final_time, 'end_of_data')
         
+        # Update executed_trades count (final count after all positions closed)
+        self.signal_stats['executed_trades'] = len(self.trades)
+        
         # Calculate metrics
         metrics = MetricsCalculator.calculate(self.trades, self.config.backtest.initial_balance)
         metrics_dict = MetricsCalculator.to_dict(metrics)
         
-        return self.trades, metrics_dict
+        return self.trades, metrics_dict, self.signal_stats
+
+    def _init_signal_stats(self) -> None:
+        """Initialize signal pipeline statistics."""
+        self.signal_stats = {
+            'raw_signals': 0,
+            'after_news_filter': 0,
+            'after_min_rr': 0,
+            'executed_trades': 0,
+            'skipped_open_position': 0,
+            'skipped_max_trades_per_day': 0,
+            'skipped_min_interval': 0,
+            'skipped_other': 0,
+        }
+    
+    def _increment_skip(self, reason: Optional[str]) -> None:
+        """Increment skipped signal counters based on reason."""
+        mapping = {
+            'open_position': 'skipped_open_position',
+            'max_trades': 'skipped_max_trades_per_day',
+            'min_interval': 'skipped_min_interval',
+        }
+        key = mapping.get(reason, 'skipped_other')
+        if key not in self.signal_stats:
+            # Ensure key exists even if signal_stats wasn't reset properly
+            self.signal_stats[key] = 0
+        self.signal_stats[key] += 1
 
