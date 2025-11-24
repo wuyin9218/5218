@@ -127,13 +127,16 @@ class BinanceRestClient:
             raise
         
         if not all_klines:
-            # Return empty DataFrame with correct columns when no data
-            return pd.DataFrame(columns=[
+            # Return empty DataFrame with correct columns and index when no data
+            df_empty = pd.DataFrame(columns=[
                 "open_time", "open", "high", "low", "close", "volume",
                 "close_time", "quote_asset_volume", "number_of_trades",
                 "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume",
                 "ignore",
             ])
+            # Set index name for consistency with non-empty DataFrames
+            df_empty.index.name = "timestamp"
+            return df_empty[["open", "high", "low", "close", "volume"]]
         
         # Convert to DataFrame
         df = pd.DataFrame(all_klines, columns=[
@@ -155,6 +158,15 @@ class BinanceRestClient:
         
         # Rename index to timestamp for compatibility
         df.index.name = "timestamp"
+        
+        # CRITICAL FIX: Remove the last incomplete candle to avoid lookahead bias
+        # If end_time is specified, check if the last candle's close_time exceeds it
+        if end_time is not None and not df.empty:
+            last_close_time = df.iloc[-1]['close_time']
+            # If last candle's close time is after requested end_time, it's incomplete
+            if last_close_time > end_time:
+                df = df.iloc[:-1]
+                print(f"[INFO] Removed incomplete last candle (close_time={last_close_time} > end_time={end_time})")
         
         return df[["open", "high", "low", "close", "volume"]]
     

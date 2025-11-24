@@ -10,7 +10,16 @@ from config.loader import GlobalConfig, RiskConfig
 
 
 class BacktestRunner:
-    """Event-driven backtest engine."""
+    """
+    Event-driven backtest engine.
+    
+    IMPORTANT DESIGN NOTES:
+    - This is a simplified margin-based model suitable for perpetual futures
+    - Both long and short positions occupy margin (balance is reduced by entry_cost)
+    - Position sizing is based on risk per trade (not leverage-adjusted)
+    - All calculations assume 1x leverage equivalent (full position value)
+    - For leveraged trading, position_size calculation would need adjustment
+    """
     
     def __init__(
         self,
@@ -85,7 +94,8 @@ class BacktestRunner:
                 return False, 'min_interval'
         
         # Check daily loss limit (日内亏损熔断)
-        daily_loss_limit_amount = self.initial_balance * (self.risk_config.daily_loss_limit_pct / 100.0)
+        # CRITICAL FIX: Use current balance instead of initial balance for proper risk management
+        daily_loss_limit_amount = self.balance * (self.risk_config.daily_loss_limit_pct / 100.0)
         daily_net_pnl = self.daily_pnl.get(date_key, 0.0)
         if daily_net_pnl <= -daily_loss_limit_amount:
             return False, 'other'
@@ -186,6 +196,9 @@ class BacktestRunner:
         self.balance -= entry_cost
         self.last_trade_time = entry_time
         
+        # Update equity curve after entry (to track drawdown during open position)
+        self.equity_curve.append((entry_time, self.balance))
+        
         # Update daily trade count
         date_key = entry_time.date()
         self.daily_trades[date_key] = self.daily_trades.get(date_key, 0) + 1
@@ -284,7 +297,7 @@ class BacktestRunner:
         date_key = exit_time.date()
         self.daily_pnl[date_key] = self.daily_pnl.get(date_key, 0.0) + net_pnl
         
-        # Update equity curve
+        # Update equity curve after exit
         self.equity_curve.append((exit_time, self.balance))
         
         # Record trade
@@ -308,9 +321,16 @@ class BacktestRunner:
             self.consecutive_losses += 1
             # Check if we need cooldown
             if self.consecutive_losses >= self.risk_config.consecutive_loss_limit:
-                self.cooldown_until = exit_time + pd.Timedelta(minutes=self.risk_config.cooldown_minutes)
+                cooldown_end = exit_time + pd.Timedelta(minutes=self.risk_config.cooldown_minutes)
+                self.cooldown_until = cooldown_end
+                print(f"[WARN] Consecutive loss limit reached ({self.consecutive_losses}). "
+                      f"Cooldown until {cooldown_end}")
         else:
             self.consecutive_losses = 0
+            # Reset cooldown when we have a winning trade
+            if self.cooldown_until:
+                print(f"[INFO] Cooldown reset after winning trade")
+                self.cooldown_until = None
         
         # Remove position
         del self.open_positions[symbol]
