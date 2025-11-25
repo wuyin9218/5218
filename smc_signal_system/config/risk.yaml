@@ -1,10 +1,16 @@
 risk:
   risk_per_trade_pct: 0.5
   daily_loss_limit_pct: 2.0
+  daily_loss_limit_mode: day_equity
   consecutive_loss_limit: 3
   cooldown_minutes: 240
   min_signal_interval_minutes: 180
   min_rr: 1.5
+  min_stop_distance_pct: 0.0005
+  min_stop_distance_abs: 0.0
+
+
+
 
 
 

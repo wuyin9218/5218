@@ -1,0 +1,38 @@
+project:
+  name: "smc_signal_system_baseline"
+  timezone: "UTC"
+  data_dir: "./data"
+  backtest_dir: "./backtests"
+
+data:
+  exchange: "binance_usdm"
+  start_date: "2024-11-01"
+  end_date: "2024-12-01"
+  intervals: ["5m"]
+  limit_per_call: 1500
+  binance:
+    offline_fallback: false
+
+backtest:
+  initial_balance: 10000
+  fee_bps: 4.0
+  slippage_bps: 2.0
+  max_trades_per_day: 5
+  seed: 42
+
+strategies:
+  model_a:
+    name: TrendOBFVGStrategy
+    mode: baseline
+    trend_filter_enabled: false
+    use_fvg_filter: false
+    rr_target: 2.0
+    max_signals_per_ob: 1
+
+notifications:
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""
+
+

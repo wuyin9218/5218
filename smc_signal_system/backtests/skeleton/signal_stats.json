@@ -1,32 +1,32 @@
 {
   "BTCUSDT": {
-    "raw_signals": 837,
-    "after_news_filter": 837,
-    "after_min_rr": 837,
-    "executed_trades": 21,
-    "skipped_open_position": 0,
-    "skipped_max_trades_per_day": 259,
-    "skipped_min_interval": 282,
-    "skipped_other": 275
+    "raw_signals": 3045,
+    "after_news_filter": 3045,
+    "after_min_rr": 3045,
+    "executed_trades": 70,
+    "skipped_open_position": 1640,
+    "skipped_max_trades_per_day": 30,
+    "skipped_min_interval": 891,
+    "skipped_other": 414
   },
   "ETHUSDT": {
-    "raw_signals": 1262,
-    "after_news_filter": 1262,
-    "after_min_rr": 1262,
-    "executed_trades": 24,
-    "skipped_open_position": 3,
-    "skipped_max_trades_per_day": 445,
-    "skipped_min_interval": 555,
-    "skipped_other": 235
+    "raw_signals": 2974,
+    "after_news_filter": 2974,
+    "after_min_rr": 2974,
+    "executed_trades": 99,
+    "skipped_open_position": 1183,
+    "skipped_max_trades_per_day": 95,
+    "skipped_min_interval": 1174,
+    "skipped_other": 423
   },
   "SOLUSDT": {
-    "raw_signals": 1084,
-    "after_news_filter": 1084,
-    "after_min_rr": 1084,
-    "executed_trades": 4,
-    "skipped_open_position": 0,
-    "skipped_max_trades_per_day": 0,
-    "skipped_min_interval": 84,
-    "skipped_other": 996
+    "raw_signals": 2627,
+    "after_news_filter": 2627,
+    "after_min_rr": 2627,
+    "executed_trades": 118,
+    "skipped_open_position": 740,
+    "skipped_max_trades_per_day": 209,
+    "skipped_min_interval": 1123,
+    "skipped_other": 437
   }
 }

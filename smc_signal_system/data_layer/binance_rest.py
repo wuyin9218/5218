@@ -31,7 +31,12 @@ class BinanceRestClient:
         "1M": "1M"
     }
     
-    def __init__(self, timeout: float = 10.0, offline_fallback: bool = True):
+    def __init__(
+        self,
+        timeout: float = 10.0,
+        offline_fallback: bool = False,
+        limit_per_call: int = 1500,
+    ):
         """
         Initialize Binance REST client.
         
@@ -42,7 +47,8 @@ class BinanceRestClient:
         self.session = requests.Session()
         self.timeout = timeout
         self.offline_fallback = offline_fallback
-        self.limit_per_call = 1500
+        # Binance Futures API limit is 1500 per request; enforce upper bound
+        self.limit_per_call = min(limit_per_call, 1500)
     
     def fetch_klines(
         self,
@@ -68,27 +74,26 @@ class BinanceRestClient:
         if interval not in self.INTERVAL_MAP:
             raise ValueError(f"Unsupported interval: {interval}")
         
-        # If offline mode is enabled, directly return dummy data without network requests
-        if self.offline_fallback:
-            return self._generate_dummy_klines(
-                symbol, interval, start_time, end_time, limit or self.limit_per_call
-            )
-        
-        # Online mode: fetch real data from Binance API
-        all_klines = []
+        request_limit = min(limit or self.limit_per_call, self.limit_per_call)
+        ms_interval = self._interval_to_milliseconds(interval)
+        start_ts = int(start_time.timestamp() * 1000) if start_time else None
+        end_ts = int(end_time.timestamp() * 1000) if end_time else None
+        next_start = start_ts
+        all_klines: List[List] = []
+        paginate = any(ts is not None for ts in (start_ts, end_ts)) or bool(limit)
+
         try:
             while True:
                 params = {
                     "symbol": symbol,
                     "interval": self.INTERVAL_MAP[interval],
-                    "limit": limit or self.limit_per_call
+                    "limit": request_limit,
                 }
-                
-                if start_time is not None:
-                    params["startTime"] = int(start_time.timestamp() * 1000)
-                if end_time is not None:
-                    params["endTime"] = int(end_time.timestamp() * 1000)
-                
+                if next_start is not None:
+                    params["startTime"] = next_start
+                if end_ts is not None:
+                    params["endTime"] = end_ts
+
                 resp = self.session.get(
                     f"{self.BASE_URL}/fapi/v1/klines",
                     params=params,
@@ -96,34 +101,39 @@ class BinanceRestClient:
                 )
                 resp.raise_for_status()
                 rows = resp.json()
-                
+
                 if not rows:
                     break
-                
+
                 all_klines.extend(rows)
-                
-                # If we got fewer than requested, we're done
-                if len(rows) < params["limit"]:
-                    break
-                
-                # If limit is specified and we have enough, break
+
                 if limit and len(all_klines) >= limit:
                     all_klines = all_klines[:limit]
                     break
-                
-                # Update start_time for next batch
-                last_timestamp = rows[-1][0]
-                params["startTime"] = last_timestamp + 1
-                
-                # Rate limiting
+
+                # If we are not paginating (no explicit start/end and no limit),
+                # stop after the first batch.
+                if not paginate:
+                    break
+
+                if len(rows) < request_limit:
+                    break
+
+                last_open_time = rows[-1][0]
+                next_start = last_open_time + (ms_interval or 1)
+
+                if end_ts is not None and next_start >= end_ts:
+                    break
+
+                # Respect API rate limits
                 time.sleep(0.1)
-                
+
         except requests.RequestException:
             if self.offline_fallback:
-                # In case of network failure, print warning and fall back to dummy data
                 print(f"[WARN] Binance request failed for {symbol} {interval}, using offline dummy data instead.")
-                return self._generate_dummy_klines(symbol, interval, start_time, end_time, limit or self.limit_per_call)
-            # If fallback is disabled, re-raise the exception
+                return self._generate_dummy_klines(
+                    symbol, interval, start_time, end_time, limit or self.limit_per_call
+                )
             raise
         
         if not all_klines:
@@ -150,11 +160,13 @@ class BinanceRestClient:
         for col in ["open", "high", "low", "close", "volume", "quote_asset_volume"]:
             df[col] = df[col].astype(float)
         
-        df = df.set_index("open_time")
-        df = df.sort_index()
-        
-        # Rename index to timestamp for compatibility
+        df = df.set_index("open_time").sort_index()
         df.index.name = "timestamp"
+
+        if start_time is not None:
+            df = df[df.index >= start_time]
+        if end_time is not None:
+            df = df[df.index < end_time]
         
         return df[["open", "high", "low", "close", "volume"]]
     
@@ -248,4 +260,26 @@ class BinanceRestClient:
         df.index.name = "timestamp"
         
         return df[["open", "high", "low", "close", "volume"]]
+
+    @staticmethod
+    def _interval_to_milliseconds(interval: str) -> Optional[int]:
+        """Return interval length in milliseconds."""
+        mapping = {
+            "1m": 60_000,
+            "3m": 3 * 60_000,
+            "5m": 5 * 60_000,
+            "15m": 15 * 60_000,
+            "30m": 30 * 60_000,
+            "1h": 60 * 60_000,
+            "2h": 2 * 60 * 60_000,
+            "4h": 4 * 60 * 60_000,
+            "6h": 6 * 60 * 60_000,
+            "8h": 8 * 60 * 60_000,
+            "12h": 12 * 60 * 60_000,
+            "1d": 24 * 60 * 60_000,
+            "3d": 3 * 24 * 60 * 60_000,
+            "1w": 7 * 24 * 60 * 60_000,
+            "1M": 30 * 24 * 60 * 60_000,
+        }
+        return mapping.get(interval)
 

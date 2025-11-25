@@ -44,7 +44,11 @@ def main():
     print()
     
     # Initialize data components (same as run_backtest)
-    client = BinanceRestClient()
+    binance_cfg = getattr(global_config.data, "binance", None)
+    client = BinanceRestClient(
+        offline_fallback=binance_cfg.offline_fallback if binance_cfg else False,
+        limit_per_call=global_config.data.limit_per_call,
+    )
     cache = DataCache(cache_dir=global_config.project.data_dir)
     
     # Load data

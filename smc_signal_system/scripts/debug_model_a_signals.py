@@ -24,6 +24,7 @@ from config.loader import (
 from data_layer.binance_rest import BinanceRestClient
 from data_layer.cache import DataCache
 from strategy_engine.model_a import TrendOBFVGStrategy
+from data_layer.time_utils import align_end_to_closed_bar
 
 
 def main():
@@ -35,6 +36,12 @@ def main():
         type=str,
         default="ETHUSDT",
         help="Trading symbol to debug (default: ETHUSDT)"
+    )
+    parser.add_argument(
+        "--max-bars",
+        type=int,
+        default=None,
+        help="Maximum number of candles to process for debugging (default: all)",
     )
     args = parser.parse_args()
     
@@ -50,10 +57,15 @@ def main():
     
     print(f"Symbol: {symbol}")
     print(f"Date range: {global_config.data.start_date} to {global_config.data.end_date}")
+    print(f"Aligned end (last closed bar open): {effective_end}")
     print()
     
     # Initialize data components (same as run_backtest)
-    client = BinanceRestClient()
+    binance_cfg = getattr(global_config.data, "binance", None)
+    client = BinanceRestClient(
+        offline_fallback=binance_cfg.offline_fallback if binance_cfg else False,
+        limit_per_call=global_config.data.limit_per_call,
+    )
     cache = DataCache(cache_dir=global_config.project.data_dir)
     
     # Get primary interval from config
@@ -67,6 +79,9 @@ def main():
     # Load data (same as run_backtest)
     start_date = pd.to_datetime(global_config.data.start_date)
     end_date = pd.to_datetime(global_config.data.end_date)
+    effective_end = align_end_to_closed_bar(end_date, primary_interval)
+    if effective_end < start_date:
+        effective_end = start_date
     
     df = cache.get(symbol, primary_interval, start_date, end_date)
     
@@ -81,13 +96,13 @@ def main():
         cached_end = df.index.max() if not df.empty else None
         
         # Check if we have enough data in the required range
-        filtered_df = df[(df.index >= start_date) & (df.index <= end_date)]
+        filtered_df = df[(df.index >= start_date) & (df.index <= effective_end)]
         if filtered_df.empty or len(filtered_df) < 100:  # Require at least 100 candles
             need_refetch = True
             print(f"  Cached data insufficient (got {len(filtered_df)} candles, need ~1500), fetching {symbol} {primary_interval} data...")
-        elif cached_start > start_date or (cached_end and cached_end < end_date):
+        elif cached_start > start_date or (cached_end and cached_end < effective_end):
             need_refetch = True
-            print(f"  Cached data range ({cached_start} to {cached_end}) doesn't cover required range ({start_date} to {end_date}), fetching...")
+            print(f"  Cached data range ({cached_start} to {cached_end}) doesn't cover required range ({start_date} to {effective_end}), fetching...")
     
     if need_refetch:
         df = client.fetch_klines(
@@ -104,8 +119,8 @@ def main():
         print(f"  Error: No data for {symbol}")
         return
     
-    # Filter by date range
-    df = df[(df.index >= start_date) & (df.index <= end_date)]
+    # Filter by date range (aligned to last closed candle)
+    df = df[(df.index >= start_date) & (df.index <= effective_end)]
     
     if df.empty:
         print(f"  Error: No data in date range for {symbol}")
@@ -144,10 +159,19 @@ def main():
         "num_failed_trend_filter": 0,
         "num_failed_fvg_filter": 0,
         "num_failed_rr_filter": 0,
-        "num_signals_generated": 0
+        "num_signals_generated": 0,
+        "skipped_ob_duplicate": 0,
     }
     
-    for idx, row in df.iterrows():
+    total_bars = len(df)
+    for i, (idx, row) in enumerate(df.iterrows()):
+        if args.max_bars is not None and i >= args.max_bars:
+            print(f"[DEBUG] Reached max-bars limit ({args.max_bars}), stopping early.")
+            break
+
+        if i % 1000 == 0:
+            print(f"[DEBUG] processed {i} / {total_bars} bars...")
+
         current_time = idx if isinstance(idx, datetime) else pd.to_datetime(idx)
         
         # Use data up to current time (same as backtest)

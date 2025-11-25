@@ -12,7 +12,10 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.loader import (
-    GlobalConfig, SymbolsConfig, RiskConfig, NewsFilterConfig
+    GlobalConfig,
+    SymbolsConfig,
+    RiskConfig,
+    NewsFilterConfig,
 )
 from data_layer.binance_rest import BinanceRestClient
 from data_layer.cache import DataCache
@@ -21,6 +24,8 @@ from backtest.slippage_fee import SlippageFeeModel
 from backtest.metrics import Trade
 from backtest.news_filter import NewsFilter
 from strategy_engine.model_a import TrendOBFVGStrategy
+from io_layer.telegram_notifier import TelegramNotifier
+from data_layer.time_utils import align_end_to_closed_bar
 
 
 def dummy_signal_generator(df: pd.DataFrame, current_time: datetime) -> dict:
@@ -46,7 +51,8 @@ def run_backtest(
     global_config: GlobalConfig,
     symbols_config: SymbolsConfig,
     risk_config: RiskConfig,
-    news_filter_config: NewsFilterConfig
+    news_filter_config: NewsFilterConfig,
+    telegram_notifier: Optional[TelegramNotifier] = None,
 ) -> Tuple[list, dict, dict]:
     """
     Run backtest for all symbols.
@@ -64,7 +70,11 @@ def run_backtest(
     signal_stats_dict = {}
     
     # Initialize components
-    client = BinanceRestClient()
+    binance_cfg = getattr(global_config.data, "binance", None)
+    client = BinanceRestClient(
+        offline_fallback=binance_cfg.offline_fallback if binance_cfg else False,
+        limit_per_call=global_config.data.limit_per_call,
+    )
     cache = DataCache(cache_dir=global_config.project.data_dir)
     fee_model = SlippageFeeModel(
         fee_bps=global_config.backtest.fee_bps,
@@ -90,6 +100,9 @@ def run_backtest(
         # Try to get from cache first
         start_date = pd.to_datetime(global_config.data.start_date)
         end_date = pd.to_datetime(global_config.data.end_date)
+        effective_end = align_end_to_closed_bar(end_date, primary_interval)
+        if effective_end < start_date:
+            effective_end = start_date
         
         df = cache.get(symbol, primary_interval, start_date, end_date)
         
@@ -104,11 +117,11 @@ def run_backtest(
             cached_end = df.index.max() if not df.empty else None
             
             # Check if we have enough data in the required range
-            filtered_df = df[(df.index >= start_date) & (df.index <= end_date)]
+            filtered_df = df[(df.index >= start_date) & (df.index <= effective_end)]
             if filtered_df.empty or len(filtered_df) < 100:  # Require at least 100 candles
                 need_refetch = True
                 print(f"  Cached data insufficient (got {len(filtered_df)} candles), fetching {symbol} {primary_interval} data...")
-            elif cached_start > start_date or (cached_end and cached_end < end_date):
+            elif cached_start > start_date or (cached_end and cached_end < effective_end):
                 need_refetch = True
                 print(f"  Cached data range doesn't cover required range, fetching {symbol} {primary_interval} data...")
         
@@ -127,15 +140,21 @@ def run_backtest(
             print(f"  Warning: No data for {symbol}")
             continue
         
-        # Filter by date range
-        df = df[(df.index >= start_date) & (df.index <= end_date)]
+        # Filter by date range (aligned to last closed candle)
+        df = df[(df.index >= start_date) & (df.index <= effective_end)]
         
         if df.empty:
             print(f"  Warning: No data in date range for {symbol}")
             continue
         
         # Run backtest
-        runner = BacktestRunner(global_config, risk_config, fee_model, news_filter=news_filter)
+        runner = BacktestRunner(
+            global_config,
+            risk_config,
+            fee_model,
+            news_filter=news_filter,
+            telegram_notifier=telegram_notifier,
+        )
         
         # Load strategy config from global config
         strategy_config = {}
@@ -307,12 +326,20 @@ def main():
     print(f"Symbols: {', '.join(symbols_config.symbols)}")
     print()
     
+    # Telegram notifier reads from the same config passed via --config to keep alerts aligned with the chosen backtest/global config
+    telegram_notifier: Optional[TelegramNotifier] = None
+    notifications = getattr(global_config, "notifications", None)
+    telegram_cfg = getattr(notifications, "telegram", None) if notifications else None
+    if telegram_cfg and telegram_cfg.enabled:
+        telegram_notifier = TelegramNotifier(telegram_cfg)
+
     try:
         trades, metrics, signal_stats = run_backtest(
             global_config,
             symbols_config,
             risk_config,
-            news_filter_config
+            news_filter_config,
+            telegram_notifier=telegram_notifier,
         )
         
         # Print signal pipeline stats
@@ -351,4 +378,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

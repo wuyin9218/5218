@@ -1,8 +1,12 @@
 """Model A: Trend-following Order Block pullback with FVG confirmation."""
 
+from collections import defaultdict
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from types import SimpleNamespace
+from typing import Optional, List, Dict, Any, Tuple
+
 import pandas as pd
+
 from strategy_engine.base import BaseStrategy, Signal
 from smc_engine.indicators import SMCIndicators
 from smc_engine.structure import SMCStructure, OrderBlock, BOSCHOC, FVG
@@ -36,6 +40,8 @@ class TrendOBFVGStrategy(BaseStrategy):
         self.mode = config.get("mode", "strict")
         self.trend_filter_enabled = config.get("trend_filter_enabled", True)
         self.use_fvg_filter = config.get("use_fvg_filter", True)
+        self.max_signals_per_ob = int(config.get("max_signals_per_ob", 1))
+        self._ob_signal_counts: Dict[Tuple[str, Any], int] = defaultdict(int)
         
         try:
             self.indicators = SMCIndicators()
@@ -55,7 +61,8 @@ class TrendOBFVGStrategy(BaseStrategy):
             "num_failed_trend_filter": 0,       # 被趋势过滤刷掉
             "num_failed_fvg_filter": 0,         # 被 FVG 过滤刷掉
             "num_failed_rr_filter": 0,          # 被 RR 要求刷掉
-            "num_signals_generated": 0
+            "num_signals_generated": 0,
+            "skipped_ob_duplicate": 0,
         }
 
     def generate_signal(self, data: pd.DataFrame, current_time: datetime) -> Optional[Signal]:
@@ -80,7 +87,8 @@ class TrendOBFVGStrategy(BaseStrategy):
             "num_failed_trend_filter": 0,
             "num_failed_fvg_filter": 0,
             "num_failed_rr_filter": 0,
-            "num_signals_generated": 0
+            "num_signals_generated": 0,
+            "skipped_ob_duplicate": 0,
         }
         
         if data.empty:
@@ -240,6 +248,17 @@ class TrendOBFVGStrategy(BaseStrategy):
             take_profit = entry_price - risk * self.rr_target
         
         # Generate signal
+        ob_object = ob if 'ob' in locals() and ob is not None else SimpleNamespace(
+            time=current_time,
+            low=ob_low,
+            high=ob_high,
+            id=f"synthetic_{current_time.isoformat()}"
+        )
+
+        if not self._can_trigger_for_ob(side, ob_object):
+            self.debug_stats["skipped_ob_duplicate"] += 1
+            return None
+
         signal = Signal(
             symbol=self.symbol,
             side=side,
@@ -253,6 +272,7 @@ class TrendOBFVGStrategy(BaseStrategy):
             },
         )
         
+        self._register_ob_trigger(side, ob_object)
         self.debug_stats["num_signals_generated"] += 1
         return signal
     
@@ -351,6 +371,11 @@ class TrendOBFVGStrategy(BaseStrategy):
         # We don't have access to min_rr here, so we'll just count successful signals
         # The actual RR filtering happens in BacktestRunner
 
+        ob_object = ob
+        if not self._can_trigger_for_ob(side, ob_object):
+            self.debug_stats["skipped_ob_duplicate"] += 1
+            return None
+
         signal = Signal(
             symbol=self.symbol,
             side=side,
@@ -364,6 +389,7 @@ class TrendOBFVGStrategy(BaseStrategy):
             },
         )
         
+        self._register_ob_trigger(side, ob_object)
         self.debug_stats["num_signals_generated"] += 1
         return signal
 
@@ -401,8 +427,39 @@ class TrendOBFVGStrategy(BaseStrategy):
         ]
         if not obs:
             return None
-        obs = sorted(obs, key=lambda o: o.time)
-        return obs[-1]
+
+    def _make_ob_key(self, side: str, ob: Any) -> Tuple[str, Any]:
+        """Build a stable hashable key for an order block."""
+        if ob is None:
+            return (side, "unknown")
+
+        low = getattr(ob, "low", None)
+        high = getattr(ob, "high", None)
+        if low is not None and high is not None:
+            # Round to avoid floating-point jitter; 1e-6 precision is fine for USDT pairs
+            rounded = (round(low, 6), round(high, 6))
+            return (side, ("range", rounded))
+
+        for attr in ("id", "identifier", "index", "source_index", "bos_index", "time"):
+            value = getattr(ob, attr, None)
+            if value is not None:
+                return (side, (attr, value))
+
+        return (side, ("object", id(ob)))
+
+    def _can_trigger_for_ob(self, side: str, ob: Any) -> bool:
+        """Return True if OB can still emit a signal under the per-OB limit."""
+        if self.max_signals_per_ob <= 0:
+            return True
+        key = self._make_ob_key(side, ob)
+        return self._ob_signal_counts[key] < self.max_signals_per_ob
+
+    def _register_ob_trigger(self, side: str, ob: Any) -> None:
+        """Record that an OB generated a signal."""
+        if self.max_signals_per_ob <= 0:
+            return
+        key = self._make_ob_key(side, ob)
+        self._ob_signal_counts[key] += 1
 
     def _price_in_ob(self, row: pd.Series, ob: OrderBlock, trend: str) -> bool:
         """

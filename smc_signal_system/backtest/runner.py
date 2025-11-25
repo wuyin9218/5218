@@ -1,12 +1,18 @@
 """Event-driven backtest runner for SMC signals."""
 
-import pandas as pd
+import logging
+from datetime import datetime, date
 from typing import List, Optional, Callable, Tuple
-from datetime import datetime
+
 import numpy as np
+import pandas as pd
+
 from backtest.slippage_fee import SlippageFeeModel
 from backtest.metrics import Trade, MetricsCalculator
 from config.loader import GlobalConfig, RiskConfig
+from io_layer.telegram_notifier import TelegramNotifier
+
+logger = logging.getLogger(__name__)
 
 
 class BacktestRunner:
@@ -17,7 +23,8 @@ class BacktestRunner:
         global_config: GlobalConfig,
         risk_config: RiskConfig,
         slippage_fee_model: SlippageFeeModel,
-        news_filter=None
+        news_filter=None,
+        telegram_notifier: Optional[TelegramNotifier] = None,
     ):
         """
         Initialize backtest runner.
@@ -32,10 +39,12 @@ class BacktestRunner:
         self.risk_config = risk_config
         self.fee_model = slippage_fee_model
         self.news_filter = news_filter
+        self.telegram_notifier = telegram_notifier
         
         # State
         self.initial_balance = global_config.backtest.initial_balance
         self.balance = global_config.backtest.initial_balance
+        self.current_equity = self.balance
         self.trades: List[Trade] = []
         self.open_positions: dict = {}  # symbol -> position info
         self.daily_trades: dict = {}  # date -> count
@@ -44,6 +53,10 @@ class BacktestRunner:
         self.consecutive_losses = 0
         self.last_trade_time: Optional[datetime] = None
         self.cooldown_until: Optional[datetime] = None
+        self.current_date: Optional[date] = None
+        self.day_start_equity: float = self.current_equity
+        self.day_realized_pnl: float = 0.0
+        self.day_trading_locked: bool = False
         
         # Signal pipeline statistics
         self._init_signal_stats()
@@ -64,14 +77,20 @@ class BacktestRunner:
         Returns:
             Tuple of (allowed flag, reason string if not allowed)
         """
-        # Check cooldown
+        # Ensure day state is aligned with current time
+        self._ensure_day_state(current_time)
+
+        # Reset cooldown if it has expired
+        self._reset_cooldown_if_needed(current_time)
+
+        # Check cooldown window
         if self.cooldown_until and current_time < self.cooldown_until:
-            return False, 'other'
+            return False, 'cooldown'
         
-        # Check consecutive losses
-        if self.consecutive_losses >= self.risk_config.consecutive_loss_limit:
-            return False, 'other'
-        
+        # Check daily loss lock
+        if self.day_trading_locked:
+            return False, 'daily_loss'
+
         # Check daily trade limit
         date_key = current_time.date()
         if date_key in self.daily_trades:
@@ -83,12 +102,6 @@ class BacktestRunner:
             minutes_since = (current_time - self.last_trade_time).total_seconds() / 60
             if minutes_since < self.risk_config.min_signal_interval_minutes:
                 return False, 'min_interval'
-        
-        # Check daily loss limit (日内亏损熔断)
-        daily_loss_limit_amount = self.initial_balance * (self.risk_config.daily_loss_limit_pct / 100.0)
-        daily_net_pnl = self.daily_pnl.get(date_key, 0.0)
-        if daily_net_pnl <= -daily_loss_limit_amount:
-            return False, 'other'
         
         return True, None
     
@@ -109,11 +122,23 @@ class BacktestRunner:
         """
         risk_amount = self.balance * (self.risk_config.risk_per_trade_pct / 100.0)
         price_risk = abs(entry_price - stop_loss_price)
-        
-        if price_risk == 0:
+
+        min_pct = getattr(self.risk_config, "min_stop_distance_pct", 0.0)
+        min_abs = getattr(self.risk_config, "min_stop_distance_abs", 0.0)
+
+        min_dist_pct = entry_price * min_pct if min_pct and entry_price > 0 else 0.0
+        min_dist_abs = min_abs if min_abs and min_abs > 0 else 0.0
+        min_distance = max(min_dist_pct, min_dist_abs)
+
+        adjusted_price_risk = max(price_risk, min_distance)
+
+        if adjusted_price_risk <= 0:
             return 0.0
+
+        if adjusted_price_risk > price_risk and self.signal_stats.get('adjusted_min_stop_distance') is not None:
+            self.signal_stats['adjusted_min_stop_distance'] += 1
         
-        quantity = risk_amount / price_risk
+        quantity = risk_amount / adjusted_price_risk
         return quantity
     
     def enter_position(
@@ -189,7 +214,16 @@ class BacktestRunner:
         # Update daily trade count
         date_key = entry_time.date()
         self.daily_trades[date_key] = self.daily_trades.get(date_key, 0) + 1
-        
+
+        self._notify_telegram_on_execution(
+            symbol=symbol,
+            side=side,
+            entry_time=entry_time,
+            entry_price=entry_price,
+            stop_loss=stop_loss_price,
+            take_profit=take_profit_price,
+        )
+
         return True, None
     
     def check_exit_conditions(
@@ -280,9 +314,10 @@ class BacktestRunner:
         exit_proceeds = exec_exit_price * pos['quantity'] - exit_fee
         self.balance += exit_proceeds
         
-        # Update daily PnL
+        # Update daily PnL (legacy stats)
         date_key = exit_time.date()
         self.daily_pnl[date_key] = self.daily_pnl.get(date_key, 0.0) + net_pnl
+        self._update_day_pnl(net_pnl, exit_time)
         
         # Update equity curve
         self.equity_curve.append((exit_time, self.balance))
@@ -306,9 +341,17 @@ class BacktestRunner:
         # Update state
         if net_pnl < 0:
             self.consecutive_losses += 1
-            # Check if we need cooldown
             if self.consecutive_losses >= self.risk_config.consecutive_loss_limit:
-                self.cooldown_until = exit_time + pd.Timedelta(minutes=self.risk_config.cooldown_minutes)
+                self.cooldown_until = exit_time + pd.Timedelta(
+                    minutes=self.risk_config.cooldown_minutes
+                )
+                logger.warning(
+                    "Hit max consecutive losses (%d) at %s for %s. Cooling down until %s",
+                    self.consecutive_losses,
+                    exit_time,
+                    symbol,
+                    self.cooldown_until,
+                )
         else:
             self.consecutive_losses = 0
         
@@ -342,6 +385,9 @@ class BacktestRunner:
         for idx, row in data.iterrows():
             current_time = idx if isinstance(idx, datetime) else pd.to_datetime(idx)
             current_price = row['close']
+
+            # Roll day state when date changes
+            self._ensure_day_state(current_time)
             
             # Check exit conditions for open positions
             for symbol in list(self.open_positions.keys()):
@@ -428,6 +474,7 @@ class BacktestRunner:
             'skipped_max_trades_per_day': 0,
             'skipped_min_interval': 0,
             'skipped_other': 0,
+            'adjusted_min_stop_distance': 0,
         }
     
     def _increment_skip(self, reason: Optional[str]) -> None:
@@ -436,10 +483,114 @@ class BacktestRunner:
             'open_position': 'skipped_open_position',
             'max_trades': 'skipped_max_trades_per_day',
             'min_interval': 'skipped_min_interval',
+            'daily_loss': 'skipped_other',
         }
         key = mapping.get(reason, 'skipped_other')
         if key not in self.signal_stats:
             # Ensure key exists even if signal_stats wasn't reset properly
             self.signal_stats[key] = 0
         self.signal_stats[key] += 1
+
+    def _reset_cooldown_if_needed(self, current_time: datetime) -> None:
+        """Clear cooldown and consecutive loss counter when cooldown expires."""
+        if self.cooldown_until and current_time >= self.cooldown_until:
+            self.cooldown_until = None
+            if self.consecutive_losses != 0:
+                logger.info(
+                    "Cooldown expired at %s, resetting consecutive losses.",
+                    current_time,
+                )
+            self.consecutive_losses = 0
+
+    def _ensure_day_state(self, current_time: datetime) -> None:
+        """Ensure daily tracking state matches the provided timestamp."""
+        bar_date = current_time.date()
+        if self.current_date is None or bar_date != self.current_date:
+            self.current_date = bar_date
+            self._reset_day_state()
+
+    def _reset_day_state(self) -> None:
+        """Reset per-day tracking fields at the start of a new trading day."""
+        self.day_start_equity = self.current_equity
+        self.day_realized_pnl = 0.0
+        self.day_trading_locked = False
+
+    def _update_day_pnl(self, net_pnl: float, timestamp: datetime) -> None:
+        """Update daily realized PnL after a trade is closed."""
+        self.current_equity = self.balance
+        self._ensure_day_state(timestamp)
+        self.day_realized_pnl += net_pnl
+        self._check_daily_loss_limit(timestamp)
+
+    def _check_daily_loss_limit(self, now: datetime) -> None:
+        """Lock trading for the rest of the day if daily loss threshold is exceeded."""
+        pct = self.risk_config.daily_loss_limit_pct
+        if pct <= 0:
+            return
+
+        mode = getattr(self.risk_config, "daily_loss_limit_mode", "day_equity")
+        base = self.initial_balance if mode == "initial_equity" else self.day_start_equity
+        if base <= 0:
+            return
+
+        max_loss = base * (pct / 100.0)
+
+        if -self.day_realized_pnl >= max_loss:
+            if not self.day_trading_locked:
+                self.day_trading_locked = True
+                logger.warning(
+                    "Hit daily loss limit (%.2f%% of %.2f) on %s, locking trading for the rest of the day.",
+                    pct,
+                    base,
+                    self.current_date,
+                )
+
+    def _notify_telegram_on_execution(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry_time: datetime,
+        entry_price: float,
+        stop_loss: Optional[float],
+        take_profit: Optional[float],
+    ) -> None:
+        """Send Telegram notification when a trade is opened."""
+        if self.telegram_notifier is None:
+            return
+
+        try:
+            timeframe = (
+                self.config.data.intervals[0]
+                if getattr(self.config.data, "intervals", None)
+                else "N/A"
+            )
+        except Exception:  # pragma: no cover
+            timeframe = "N/A"
+
+        direction = "多头" if side.lower() == "buy" else "空头"
+        entry_time_str = (
+            entry_time.strftime("%Y-%m-%d %H:%M") if isinstance(entry_time, datetime) else str(entry_time)
+        )
+
+        def _fmt_price(value: Optional[float]) -> str:
+            return f"{value:.2f}" if value is not None else "N/A"
+
+        planned_rr = None
+        if stop_loss is not None and take_profit is not None and stop_loss != entry_price:
+            risk = abs(entry_price - stop_loss)
+            reward = abs(take_profit - entry_price)
+            if risk > 0:
+                planned_rr = reward / risk
+
+        rr_str = f"{planned_rr:.2f}" if planned_rr is not None else "N/A"
+
+        message = (
+            f"[{symbol} {timeframe} {direction}] {entry_time_str} 开仓 @ {entry_price:.2f}, "
+            f"SL={_fmt_price(stop_loss)}, TP={_fmt_price(take_profit)}, 计划RR={rr_str}"
+        )
+
+        sent = self.telegram_notifier.send_message(message)
+        if not sent:
+            logger.warning("Telegram trade notification failed for %s", symbol)
 
